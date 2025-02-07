@@ -22,8 +22,15 @@ def get_random_problems(batch_size, problem_size):
 
     node_demand = torch.randint(1, 10, size=(batch_size, problem_size)) / float(demand_scaler)
     # shape: (batch, problem)
+    all_xy = torch.cat([depot_xy, node_xy], dim=1)  # shape: (batch, problem+1, 2)
 
-    return depot_xy, node_xy, node_demand
+    # calculate distance
+    x1 = all_xy.unsqueeze(2)  # shape: (batch, problem+1, 1, 2)
+    x2 = all_xy.unsqueeze(1)  # shape: (batch, 1, problem+1, 2)
+    node_dist = torch.sqrt(torch.sum((x1 - x2) ** 2, dim=-1))  # shape: (batch, problem+1, problem+1)
+
+    return depot_xy, node_xy, node_demand, node_dist
+    
 
 
 def augment_xy_data_by_8_fold(xy_data):

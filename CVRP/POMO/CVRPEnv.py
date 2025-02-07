@@ -13,7 +13,7 @@ class Reset_State:
     # shape: (batch, problem, 2)
     node_demand: torch.Tensor = None
     # shape: (batch, problem)
-
+    node_dist: torch.Tensor = None
 
 @dataclass
 class Step_State:
@@ -45,6 +45,7 @@ class CVRPEnv:
         self.saved_node_xy = None
         self.saved_node_demand = None
         self.saved_index = None
+        self.saved_node_dist = None
 
         # Const @Load_Problem
         ####################################
@@ -90,17 +91,19 @@ class CVRPEnv:
         self.saved_depot_xy = loaded_dict['depot_xy']
         self.saved_node_xy = loaded_dict['node_xy']
         self.saved_node_demand = loaded_dict['node_demand']
+        self.saved_node_dist = loaded_dict['node_dist']
         self.saved_index = 0
 
     def load_problems(self, batch_size, aug_factor=1):
         self.batch_size = batch_size
 
         if not self.FLAG__use_saved_problems:
-            depot_xy, node_xy, node_demand = get_random_problems(batch_size, self.problem_size)
+            depot_xy, node_xy, node_demand, node_dist = get_random_problems(batch_size, self.problem_size)
         else:
             depot_xy = self.saved_depot_xy[self.saved_index:self.saved_index+batch_size]
             node_xy = self.saved_node_xy[self.saved_index:self.saved_index+batch_size]
             node_demand = self.saved_node_demand[self.saved_index:self.saved_index+batch_size]
+            node_dist = self.saved_node_dist[self.saved_index:self.saved_index+batch_size]
             self.saved_index += batch_size
 
         if aug_factor > 1:
@@ -126,6 +129,7 @@ class CVRPEnv:
         self.reset_state.depot_xy = depot_xy
         self.reset_state.node_xy = node_xy
         self.reset_state.node_demand = node_demand
+        self.reset_state.node_dist = node_dist
 
         self.step_state.BATCH_IDX = self.BATCH_IDX
         self.step_state.POMO_IDX = self.POMO_IDX

@@ -22,10 +22,12 @@ class CVRPModel(nn.Module):
         # shape: (batch, problem, 2)
         node_demand = reset_state.node_demand
         # shape: (batch, problem)
+        node_dist = reset_state.node_dist
+        # shape: (batch, problem + 1, problem + 1)
         node_xy_demand = torch.cat((node_xy, node_demand[:, :, None]), dim=2)
         # shape: (batch, problem, 3)
 
-        self.encoded_nodes = self.encoder(depot_xy, node_xy_demand)
+        self.encoded_nodes = self.encoder(depot_xy, node_xy_demand, node_dist)
         # shape: (batch, problem+1, embedding)
         self.decoder.set_kv(self.encoded_nodes)
 
@@ -109,9 +111,11 @@ class CVRP_Encoder(nn.Module):
 
         self.embedding_depot = nn.Linear(2, embedding_dim)
         self.embedding_node = nn.Linear(3, embedding_dim)
+        self.adaptive_pool = nn.AdaptiveAvgPool1d(embedding_dim)
+        self.embedding_dist = nn.Linear(embedding_dim, embedding_dim)
         self.layers = nn.ModuleList([EncoderLayer(**model_params) for _ in range(encoder_layer_num)])
 
-    def forward(self, depot_xy, node_xy_demand):
+    def forward(self, depot_xy, node_xy_demand, node_dist):
         # depot_xy.shape: (batch, 1, 2)
         # node_xy_demand.shape: (batch, problem, 3)
 
@@ -119,9 +123,14 @@ class CVRP_Encoder(nn.Module):
         # shape: (batch, 1, embedding)
         embedded_node = self.embedding_node(node_xy_demand)
         # shape: (batch, problem, embedding)
+        adapt_dist = self.adaptive_pool(node_dist)
+        # shape: (batch, problem+1, embedding)
+        embedded_dist = self.embedding_dist(adapt_dist)
+        # shape: (batch, problem+1, embedding)
 
         out = torch.cat((embedded_depot, embedded_node), dim=1)
         # shape: (batch, problem+1, embedding)
+        out = out + embedded_dist  
 
         for layer in self.layers:
             out = layer(out)
