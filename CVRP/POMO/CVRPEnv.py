@@ -97,7 +97,7 @@ class CVRPEnv:
         self.saved_depot_xy = loaded_dict['depot_xy']
         self.saved_node_xy = loaded_dict['node_xy']
         self.saved_node_demand = loaded_dict['node_demand']
-        self.saved_node_dist = loaded_dict['node_dist']
+        # self.saved_node_dist = loaded_dict['node_dist']
         self.saved_index = 0
 
     def load_problems(self, batch_size, aug_factor=1):
@@ -326,10 +326,6 @@ class CVRPEnv:
         return time_uncertainty
 
     def _involve_time_uncertainty_expected(self, ordered_seq):
-        """
-        计算路径的期望时间不确定性，使用概率加权平均
-        与原方法功能类似，但当路径存在不确定性时将概率与值相乘再累加取其平均值作为该路径的新距离
-        """
         uncertainty_coordinates = self.reset_state.uncertainty_coordinates
         # (batch, selected_paths_count, 2, 2)
         samples_and_probs = self.reset_state.samples_and_probs
