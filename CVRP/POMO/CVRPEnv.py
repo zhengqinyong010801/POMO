@@ -1,9 +1,11 @@
-
 from dataclasses import dataclass
 import torch
 
 from CVRProblemDef import get_random_problems, augment_xy_data_by_8_fold
 
+import numpy as np
+from scipy.stats import norm
+import random
 
 @dataclass
 class Reset_State:
@@ -14,6 +16,8 @@ class Reset_State:
     node_demand: torch.Tensor = None
     # shape: (batch, problem)
     node_dist: torch.Tensor = None
+    uncertainty_coordinates: torch.Tensor = None
+    samples_and_probs: torch.Tensor = None
 
 @dataclass
 class Step_State:
@@ -46,6 +50,8 @@ class CVRPEnv:
         self.saved_node_demand = None
         self.saved_index = None
         self.saved_node_dist = None
+        self.uncertainty_coordinates = None
+        self.samples_and_probs = None
 
         # Const @Load_Problem
         ####################################
@@ -98,12 +104,14 @@ class CVRPEnv:
         self.batch_size = batch_size
 
         if not self.FLAG__use_saved_problems:
-            depot_xy, node_xy, node_demand, node_dist = get_random_problems(batch_size, self.problem_size)
+            depot_xy, node_xy, node_demand, node_dist, uncertainty_coordinates, samples_and_probs = get_random_problems(batch_size, self.problem_size)
         else:
             depot_xy = self.saved_depot_xy[self.saved_index:self.saved_index+batch_size]
             node_xy = self.saved_node_xy[self.saved_index:self.saved_index+batch_size]
             node_demand = self.saved_node_demand[self.saved_index:self.saved_index+batch_size]
             node_dist = self.saved_node_dist[self.saved_index:self.saved_index+batch_size]
+            uncertainty_coordinates = self.uncertainty_list[self.saved_index:self.saved_index+batch_size]
+            samples_and_probs = self.samples_and_probs[self.saved_index:self.saved_index+batch_size]
             self.saved_index += batch_size
 
         if aug_factor > 1:
@@ -130,6 +138,8 @@ class CVRPEnv:
         self.reset_state.node_xy = node_xy
         self.reset_state.node_demand = node_demand
         self.reset_state.node_dist = node_dist
+        self.reset_state.uncertainty_coordinates = uncertainty_coordinates
+        self.reset_state.samples_and_probs = samples_and_probs
 
         self.step_state.BATCH_IDX = self.BATCH_IDX
         self.step_state.POMO_IDX = self.POMO_IDX
@@ -236,10 +246,169 @@ class CVRPEnv:
         # shape: (batch, pomo, selected_list_length, 2)
 
         rolled_seq = ordered_seq.roll(dims=2, shifts=-1)
-        segment_lengths = ((ordered_seq-rolled_seq)**2).sum(3).sqrt()
+        segment_lengths = ((ordered_seq - rolled_seq) ** 2).sum(3).sqrt()
         # shape: (batch, pomo, selected_list_length)
 
-        travel_distances = segment_lengths.sum(2)
+        travel_distances = segment_lengths.sum(2)  # shape: (batch, pomo)
+        # travel_distances = travel_distances.unsqueeze(-1)  # shape: (batch, pomo, 1)
+
+        if travel_distances is not None:
+            time_uncertainty = self._involve_time_uncertainty_expected(ordered_seq)  # shape: (batch, pomo)
+            travel_distance = time_uncertainty + travel_distances  # shape: (batch, pomo)
+        else:
+            travel_distance = torch.zeros((self.batch_size, self.pomo_size, 1), dtype=torch.float32)  # shape: (batch, pomo, 1)
+
+        return travel_distance
+    
+    def _involve_time_uncertainty(self, ordered_seq):
+        uncertainty_coordinates = self.reset_state.uncertainty_coordinates
+        # (batch, selected_paths_count, 2, 2)
+        samples_and_probs = self.reset_state.samples_and_probs
+        # (batch, selected_paths_count, num_samples, 2)
+        batch_size, pomo_size, seq_length, _ = ordered_seq.shape
+        
+        # Initialize time uncertainty tensor
+        time_uncertainty = torch.zeros((batch_size, pomo_size, seq_length-1), dtype=torch.float32, device=ordered_seq.device)
+        
+        # Get all adjacent pairs in current sequence
+        seq_pairs = torch.stack([ordered_seq[:, :, :-1], ordered_seq[:, :, 1:]], dim=3)
+        # shape: (batch, pomo, seq_length-1, 2, 2)
+        
+        # Calculate original distances for all pairs at once
+        original_dists = torch.norm(seq_pairs[..., 0, :] - seq_pairs[..., 1, :], dim=-1)
+        # shape: (batch, pomo, seq_length-1)
+        
+        # Reshape seq_pairs for comparison
+        seq_pairs_flat = seq_pairs.view(-1, 2, 2)  # shape: (batch*pomo*seq_length-1, 2, 2)
+        
+        # Prepare uncertainty coordinates for comparison
+        uncertainty_coords_expanded = uncertainty_coordinates.unsqueeze(1).unsqueeze(2)
+        uncertainty_coords_expanded = uncertainty_coords_expanded.expand(
+            batch_size, pomo_size, seq_length-1, -1, -1, -1
+        )  # shape: (batch, pomo, seq_length-1, selected_paths_count, 2, 2)
+        
+        # Compare coordinates using broadcasting
+        start_matches = torch.all(
+            uncertainty_coords_expanded[..., 0, :] == seq_pairs.unsqueeze(3)[..., 0, :], 
+            dim=-1
+        )  # shape: (batch, pomo, seq_length-1, selected_paths_count)
+        end_matches = torch.all(
+            uncertainty_coords_expanded[..., 1, :] == seq_pairs.unsqueeze(3)[..., 1, :], 
+            dim=-1
+        )  # shape: (batch, pomo, seq_length-1, selected_paths_count)
+        
+        # Combine matches
+        matches = start_matches & end_matches
+        # shape: (batch, pomo, seq_length-1, selected_paths_count)
+        
+        # Where matches exist, sample from the corresponding distributions
+        match_indices = matches.nonzero()  # shape: (num_matches, 4)
+        
+        if len(match_indices) > 0:
+            b, p, s, m = match_indices.unbind(-1)
+            
+            # Get corresponding samples and probabilities
+            samples = samples_and_probs[b, m, :, 0]  # shape: (num_matches, num_samples)
+            probs = samples_and_probs[b, m, :, 1]    # shape: (num_matches, num_samples)
+            
+            # Sample for all matches at once
+            sampled_indices = torch.multinomial(probs, 1).squeeze(-1)  # shape: (num_matches,)
+            sampled_values = samples[torch.arange(len(samples)), sampled_indices]  # shape: (num_matches,)
+            
+            # Calculate and assign differences
+            diffs = sampled_values - original_dists[b, p, s]
+            time_uncertainty[b, p, s] = diffs
+        
+        # Sum along sequence dimension
+        time_uncertainty = time_uncertainty.sum(dim=2)
         # shape: (batch, pomo)
-        return travel_distances
+        
+        return time_uncertainty
+
+    def _involve_time_uncertainty_expected(self, ordered_seq):
+        """
+        计算路径的期望时间不确定性，使用概率加权平均
+        与原方法功能类似，但当路径存在不确定性时将概率与值相乘再累加取其平均值作为该路径的新距离
+        """
+        uncertainty_coordinates = self.reset_state.uncertainty_coordinates
+        # (batch, selected_paths_count, 2, 2)
+        samples_and_probs = self.reset_state.samples_and_probs
+        # (batch, selected_paths_count, num_samples, 2)
+        batch_size, pomo_size, seq_length, _ = ordered_seq.shape
+        
+        # Initialize time uncertainty tensor
+        time_uncertainty = torch.zeros((batch_size, pomo_size, seq_length-1), dtype=torch.float32, device=ordered_seq.device)
+        
+        # Get all adjacent pairs in current sequence
+        seq_pairs = torch.stack([ordered_seq[:, :, :-1], ordered_seq[:, :, 1:]], dim=3)
+        # shape: (batch, pomo, seq_length-1, 2, 2)
+        
+        # Calculate original distances for all pairs at once
+        original_dists = torch.norm(seq_pairs[..., 0, :] - seq_pairs[..., 1, :], dim=-1)
+        # shape: (batch, pomo, seq_length-1)
+        
+        # Prepare uncertainty coordinates for comparison
+        uncertainty_coords_expanded = uncertainty_coordinates.unsqueeze(1).unsqueeze(2)
+        uncertainty_coords_expanded = uncertainty_coords_expanded.expand(
+            batch_size, pomo_size, seq_length-1, -1, -1, -1
+        )  # shape: (batch, pomo, seq_length-1, selected_paths_count, 2, 2)
+        
+        # Compare coordinates using broadcasting
+        start_matches = torch.all(
+            uncertainty_coords_expanded[..., 0, :] == seq_pairs.unsqueeze(3)[..., 0, :], 
+            dim=-1
+        )  # shape: (batch, pomo, seq_length-1, selected_paths_count)
+        end_matches = torch.all(
+            uncertainty_coords_expanded[..., 1, :] == seq_pairs.unsqueeze(3)[..., 1, :], 
+            dim=-1
+        )  # shape: (batch, pomo, seq_length-1, selected_paths_count)
+        
+        # Combine matches
+        matches = start_matches & end_matches
+        # shape: (batch, pomo, seq_length-1, selected_paths_count)
+        
+        # Where matches exist, calculate expected value
+        match_indices = matches.nonzero()  # shape: (num_matches, 4)
+        
+        if len(match_indices) > 0:
+            b, p, s, m = match_indices.unbind(-1)
+            
+            # Get corresponding samples and probabilities
+            samples = samples_and_probs[b, m, :, 0]  # shape: (num_matches, num_samples)
+            probs = samples_and_probs[b, m, :, 1]    # shape: (num_matches, num_samples)
+            
+            # Calculate expected value: sum(probability * value)
+            expected_values = torch.sum(samples * probs, dim=1)  # shape: (num_matches,)
+            
+            # Calculate difference from original distance
+            diffs = expected_values - original_dists[b, p, s]
+            
+            # Assign to time_uncertainty tensor
+            time_uncertainty[b, p, s] = diffs
+        
+        # Sum along sequence dimension
+        time_uncertainty = time_uncertainty.sum(dim=2)
+        # shape: (batch, pomo)
+        
+        return time_uncertainty
+
+
+    
+    # def _get_travel_distance(self):
+    #     # 计算路径移动总距离
+    #     gathering_index = self.selected_node_list[:, :, :, None].expand(-1, -1, -1, 2)
+    #     # shape: (batch, pomo, selected_list_length, 2)
+    #     all_xy = self.depot_node_xy[:, None, :, :].expand(-1, self.pomo_size, -1, -1)
+    #     # shape: (batch, pomo, problem+1, 2)
+
+    #     ordered_seq = all_xy.gather(dim=2, index=gathering_index)
+    #     # shape: (batch, pomo, selected_list_length, 2)
+
+    #     rolled_seq = ordered_seq.roll(dims=2, shifts=-1)
+    #     segment_lengths = ((ordered_seq-rolled_seq)**2).sum(3).sqrt()
+    #     # shape: (batch, pomo, selected_list_length)
+
+    #     travel_distances = segment_lengths.sum(2)
+    #     # shape: (batch, pomo)
+    #     return travel_distances
 
