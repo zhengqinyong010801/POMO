@@ -30,8 +30,8 @@ from CVRPTester import CVRPTester as Tester
 # parameters
 
 env_params = {
-    'problem_size': 100,
-    'pomo_size': 100,
+    'problem_size': 20,
+    'pomo_size': 20,
 }
 
 model_params = {
@@ -50,17 +50,17 @@ tester_params = {
     'use_cuda': USE_CUDA,
     'cuda_device_num': CUDA_DEVICE_NUM,
     'model_load': {
-        'path': './result/saved_CVRP100_model',  # directory path of pre-trained model and log files saved.
-        'epoch': 30500,  # epoch version of pre-trained model to laod.
+        'path': './result/cvrp20',  # directory path of pre-trained model and log files saved.
+        'epoch': 500,  # epoch version of pre-trained model to laod.
     },
-    'test_episodes': 10*1000,
-    'test_batch_size': 1000,
-    'augmentation_enable': True,
-    'aug_factor': 8,
-    'aug_batch_size': 400,
+    'test_episodes': 100*10,
+    'test_batch_size': 10,
+    'augmentation_enable': False,
+    # 'aug_factor': 8,
+    # 'aug_batch_size': 400,
     'test_data_load': {
         'enable': True,
-        'filename': '../vrp100_test_seed1234.pt'
+        'filename': '../vrp20_10_seed.pt' 
     },
 }
 if tester_params['augmentation_enable']:
@@ -69,7 +69,7 @@ if tester_params['augmentation_enable']:
 
 logger_params = {
     'log_file': {
-        'desc': 'test_cvrp100',
+        'desc': 'test_cvrp20',
         'filename': 'log.txt'
     }
 }

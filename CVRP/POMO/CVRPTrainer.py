@@ -1,4 +1,3 @@
-
 import torch
 from logging import getLogger
 
@@ -68,6 +67,7 @@ class CVRPTrainer:
             self.logger.info('=================================================================')
 
             # LR Decay
+            self.optimizer.step()
             self.scheduler.step()
 
             # Train
@@ -164,8 +164,9 @@ class CVRPTrainer:
         reset_state, _, _ = self.env.reset()
         self.model.pre_forward(reset_state)
 
-        prob_list = torch.zeros(size=(batch_size, self.env.pomo_size, 0))
-        # shape: (batch, pomo, 0~problem)
+        # Initialize an empty list instead of concatenating tensors repeatedly
+        prob_list = []
+        # Will collect probability tensors and concat them at the end
 
         # POMO Rollout
         ###############################################
@@ -175,19 +176,30 @@ class CVRPTrainer:
             selected, prob = self.model(state)
             # shape: (batch, pomo)
             state, reward, done = self.env.step(selected)
-            prob_list = torch.cat((prob_list, prob[:, :, None]), dim=2)
+            # Append probability to list instead of concatenating tensors
+            prob_list.append(prob.unsqueeze(2))
+
+        # Concatenate all probabilities at once - more efficient
+        prob_tensor = torch.cat(prob_list, dim=2)
+        # shape: (batch, pomo, problem)
 
         # Loss
         ###############################################
-        advantage = reward - reward.float().mean(dim=1, keepdims=True)
+        # Calculate max reward for baseline
+        # reward_mean = reward.float().mean(dim=1, keepdim=True)
+        # advantage = reward - reward_mean
+        reward_max = reward.float().max(dim=1, keepdim=True)[0]
+        advantage = reward - reward_max
         # shape: (batch, pomo)
-        log_prob = prob_list.log().sum(dim=2)
+        
+        # Compute log probabilities directly
+        log_prob = torch.log(prob_tensor).sum(dim=2)
         # size = (batch, pomo)
-        loss = -advantage * log_prob  # Minus Sign: To Increase REWARD
-        # shape: (batch, pomo)
-        loss_mean = loss.mean()
+        
+        # Element-wise multiplication, then mean for loss
+        loss = -(advantage * log_prob).mean()
 
-        # Score
+        # Score - use existing max calculation
         ###############################################
         max_pomo_reward, _ = reward.max(dim=1)  # get best results from pomo
         score_mean = -max_pomo_reward.float().mean()  # negative sign to make positive value
@@ -195,6 +207,6 @@ class CVRPTrainer:
         # Step & Return
         ###############################################
         self.model.zero_grad()
-        loss_mean.backward()
+        loss.backward()
         self.optimizer.step()
-        return score_mean.item(), loss_mean.item()
+        return score_mean.item(), loss.item()

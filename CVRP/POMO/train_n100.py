@@ -59,16 +59,16 @@ optimizer_params = {
 trainer_params = {
     'use_cuda': USE_CUDA,
     'cuda_device_num': CUDA_DEVICE_NUM,
-    'epochs': 8100,
+    'epochs': 500,
     'train_episodes': 10 * 1000,
     'train_batch_size': 64,
     'prev_model_path': None,
     'logging': {
-        'model_save_interval': 500,
+        'model_save_interval': 100,
         'img_save_interval': 500,
         'log_image_params_1': {
             'json_foldername': 'log_image_style',
-            'filename': 'style_cvrp_100.json'
+            'filename': 'style_cvrp_20.json'
         },
         'log_image_params_2': {
             'json_foldername': 'log_image_style',
@@ -77,15 +77,15 @@ trainer_params = {
     },
     'model_load': {
         'enable': False,  # enable loading pre-trained model
-        # 'path': './result/saved_CVRP20_model',  # directory path of pre-trained model and log files saved.
-        # 'epoch': 2000,  # epoch version of pre-trained model to laod.
+        'path': './result/new20',  # directory path of pre-trained model and log files saved.
+        'epoch': 1000,  # epoch version of pre-trained model to laod.
 
     }
 }
 
 logger_params = {
     'log_file': {
-        'desc': 'train_cvrp_n100_with_instNorm',
+        'desc': 'saved_CVRP100_model_V2',
         'filename': 'run_log'
     }
 }

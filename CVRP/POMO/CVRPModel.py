@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,18 +15,32 @@ class CVRPModel(nn.Module):
         # shape: (batch, problem+1, EMBEDDING_DIM)
 
     def pre_forward(self, reset_state):
-        depot_xy = reset_state.depot_xy
-        # shape: (batch, 1, 2)
-        node_xy = reset_state.node_xy
-        # shape: (batch, problem, 2)
+        # depot_xy = reset_state.depot_xy
+        # # shape: (batch, 1, 2)
+        # node_xy = reset_state.node_xy
+        # # shape: (batch, problem, 2)
+        # node_demand = reset_state.node_demand
+        # # shape: (batch, problem)
+        min_dist = reset_state.min_dist
+        # shape: (batch, problem+1, problem+1)
+        max_dist = reset_state.max_dist
+        # shape: (batch, problem+1, problem+1)
         node_demand = reset_state.node_demand
         # shape: (batch, problem)
-        node_dist = reset_state.node_dist
-        # shape: (batch, problem + 1, problem + 1)
-        node_xy_demand = torch.cat((node_xy, node_demand[:, :, None]), dim=2)
-        # shape: (batch, problem, 3)
+        
+        # Reshape node_demand to (batch, problem, 1) for the embedding
+        node_demand = node_demand[:, :, None]
+        # shape: (batch, problem, 1)
+        
+        # Pad node_demand with zero for depot (at index 0)
+        batch_size = node_demand.size(0)
+        depot_demand = torch.zeros(size=(batch_size, 1, 1), device=node_demand.device)
+        node_demand_padded = torch.cat((depot_demand, node_demand), dim=1)
+        # shape: (batch, problem+1, 1)
 
-        self.encoded_nodes = self.encoder(depot_xy, node_xy_demand, node_dist)
+        # self.encoded_nodes = self.encoder(depot_xy, node_xy_demand, node_dist)
+        # # shape: (batch, problem+1, embedding)
+        self.encoded_nodes = self.encoder(node_demand_padded, min_dist, max_dist)
         # shape: (batch, problem+1, embedding)
         self.decoder.set_kv(self.encoded_nodes)
 
@@ -108,29 +121,46 @@ class CVRP_Encoder(nn.Module):
         self.model_params = model_params
         embedding_dim = self.model_params['embedding_dim']
         encoder_layer_num = self.model_params['encoder_layer_num']
-
-        self.embedding_depot = nn.Linear(2, embedding_dim)
-        self.embedding_node = nn.Linear(3, embedding_dim)
-        self.adaptive_pool = nn.AdaptiveAvgPool1d(embedding_dim)
-        self.embedding_dist = nn.Linear(embedding_dim, embedding_dim)
+        # self.embedding_depot = nn.Linear(2, embedding_dim)
+        # self.embedding_node = nn.Linear(3, embedding_dim)
+        self.embedding_demand = nn.Linear(1, embedding_dim)
+        self.adaptive_pool_min = nn.AdaptiveAvgPool1d(embedding_dim)
+        self.adaptive_pool_max = nn.AdaptiveAvgPool1d(embedding_dim)
+        self.embedding_min_dist = nn.Linear(embedding_dim, embedding_dim)
+        self.embedding_max_dist = nn.Linear(embedding_dim, embedding_dim)
         self.layers = nn.ModuleList([EncoderLayer(**model_params) for _ in range(encoder_layer_num)])
 
-    def forward(self, depot_xy, node_xy_demand, node_dist):
+    # def forward(self, depot_xy, node_xy_demand, node_dist):
+    def forward(self, node_demand, min_dist, max_dist):
         # depot_xy.shape: (batch, 1, 2)
         # node_xy_demand.shape: (batch, problem, 3)
+        # min_dist.shape: (batch, problem+1, problem+1)
+        # max_dist.shape: (batch, problem+1, problem+1)
 
-        embedded_depot = self.embedding_depot(depot_xy)
-        # shape: (batch, 1, embedding)
-        embedded_node = self.embedding_node(node_xy_demand)
-        # shape: (batch, problem, embedding)
-        adapt_dist = self.adaptive_pool(node_dist)
+        # embedded_depot = self.embedding_depot(depot_xy)
+        # # shape: (batch, 1, embedding)
+        # embedded_node = self.embedding_node(node_xy_demand)
+        # # shape: (batch, problem, embedding)
+        
+        # Process min_dist
+        adapt_min_dist = self.adaptive_pool_min(min_dist)
         # shape: (batch, problem+1, embedding)
-        embedded_dist = self.embedding_dist(adapt_dist)
+        embedded_min_dist = self.embedding_min_dist(adapt_min_dist)
+        # shape: (batch, problem+1, embedding)
+        
+        # Process max_dist
+        adapt_max_dist = self.adaptive_pool_max(max_dist)
+        # shape: (batch, problem+1, embedding)
+        embedded_max_dist = self.embedding_max_dist(adapt_max_dist)
+        # shape: (batch, problem+1, embedding)
+        
+        # Process demand
+        embedding_demand = self.embedding_demand(node_demand)
         # shape: (batch, problem+1, embedding)
 
-        out = torch.cat((embedded_depot, embedded_node), dim=1)
+        # Combine all embeddings
+        out = embedding_demand + embedded_min_dist + embedded_max_dist
         # shape: (batch, problem+1, embedding)
-        out = out + embedded_dist  
 
         for layer in self.layers:
             out = layer(out)

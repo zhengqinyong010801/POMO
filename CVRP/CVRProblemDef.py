@@ -1,10 +1,11 @@
 import torch
 import numpy as np
 import math
+import random
 from scipy.special import gamma
 
 
-def get_random_problems(batch_size, problem_size):
+def get_random_problems(batch_size, problem_size, with_distance_matrices=False):
 
     depot_xy = torch.rand(size=(batch_size, 1, 2))
     # shape: (batch, 1, 2)
@@ -16,23 +17,69 @@ def get_random_problems(batch_size, problem_size):
         demand_scaler = 30
     elif problem_size == 10:
         demand_scaler = 20
-    elif problem_size == 15:
-        demand_scaler = 25
+    elif problem_size == 50:
+        demand_scaler = 40
+    elif problem_size == 100:
+        demand_scaler = 50
+    elif problem_size == 150:
+        demand_scaler = 60
     else:
         raise NotImplementedError
 
     node_demand = torch.randint(1, 10, size=(batch_size, problem_size)) / float(demand_scaler)
     # shape: (batch, problem)
-    all_xy = torch.cat([depot_xy, node_xy], dim=1)  # shape: (batch, problem+1, 2)
+    
+    if with_distance_matrices:
+        min_dist, max_dist = convert_xy_to_distance_matrices(depot_xy, node_xy)
+        return depot_xy, node_xy, node_demand, min_dist, max_dist
+    else:
+        return depot_xy, node_xy, node_demand
 
-    uncertainty_coordinates, samples_and_probs = generate_time_uncertainty(all_xy=all_xy)
-    # print(uncertainty_list.shape)
-    # calculate distance
-    x1 = all_xy.unsqueeze(2)  # shape: (batch, problem+1, 1, 2)
-    x2 = all_xy.unsqueeze(1)  # shape: (batch, 1, problem+1, 2)
-    node_dist = torch.sqrt(torch.sum((x1 - x2) ** 2, dim=-1))  # shape: (batch, problem+1, problem+1)
 
-    return depot_xy, node_xy, node_demand, node_dist, uncertainty_coordinates, samples_and_probs
+def convert_xy_to_distance_matrices(depot_xy, node_xy):
+    """
+    Convert coordinates to min and max distance matrices
+    
+    Args:
+        depot_xy: depot coordinates, shape (batch_size, 1, 2)
+        node_xy: node coordinates, shape (batch_size, problem_size, 2)
+    
+    Returns:
+        min_distance_matrix: minimum distances between all nodes (including depot), shape (batch_size, total_nodes, total_nodes)
+        max_distance_matrix: maximum distances between all nodes (including depot), shape (batch_size, total_nodes, total_nodes)
+    """
+    # uncertainty_values = [0.2, 0.4, 0.8]
+    uncertainty_values = [0, 0, 0]
+    
+    batch_size = depot_xy.shape[0]
+    problem_size = node_xy.shape[1]
+    total_nodes = problem_size + 1
+    
+    # Combine depot and nodes
+    all_xy = torch.cat([depot_xy, node_xy], dim=1)  # shape: (batch_size, total_nodes, 2)
+    
+    # Calculate Euclidean distances between all nodes
+    # Expand dimensions for broadcasting
+    x1 = all_xy.unsqueeze(2)  # shape: (batch_size, total_nodes, 1, 2)
+    x2 = all_xy.unsqueeze(1)  # shape: (batch_size, 1, total_nodes, 2)
+    
+    # Calculate Euclidean distance
+    min_distance_matrix = torch.norm(x1 - x2, p=2, dim=3)  # shape: (batch_size, total_nodes, total_nodes)
+    
+    # Create max distance matrix by randomly selecting uncertainty factor for each element
+    # Generate random indices for uncertainty values
+    random_indices = torch.randint(0, len(uncertainty_values), size=min_distance_matrix.shape, device=min_distance_matrix.device)
+    uncertainty_matrix = torch.tensor(uncertainty_values, device=min_distance_matrix.device)[random_indices]
+    
+    # Apply uncertainty to min distances
+    max_distance_matrix = min_distance_matrix * (1 + uncertainty_matrix)
+    
+    # Set diagonal elements to 0
+    eye = torch.eye(total_nodes, device=min_distance_matrix.device).unsqueeze(0).expand(batch_size, -1, -1)
+    min_distance_matrix = min_distance_matrix * (1 - eye)
+    max_distance_matrix = max_distance_matrix * (1 - eye)
+    
+    return min_distance_matrix, max_distance_matrix
 
 
 def augment_xy_data_by_8_fold(xy_data):
@@ -55,61 +102,3 @@ def augment_xy_data_by_8_fold(xy_data):
     # shape: (8*batch, N, 2)
 
     return aug_xy_data
-
-def generate_time_uncertainty(all_xy, shape=3.0, num_samples=4, uncertainty_percent=0.1):
-    """
-    Returns:
-        1. shape: (batch, selected_paths_count, 2, 2) for coordinates
-        2. shape: (batch, selected_paths_count, num_samples, 2) for samples and probabilities
-    """
-    batch_size, num_nodes, _ = all_xy.shape
-    num_paths = num_nodes * (num_nodes - 1)
-    selected_paths_count = int(num_paths * uncertainty_percent)
-
-    all_paths = []
-    for i in range(num_nodes):
-        for j in range(num_nodes):
-            if i != j:
-                all_paths.append((i, j))
-    
-    selected_indices = np.random.choice(len(all_paths), size=selected_paths_count, replace=False)
-    selected_paths = [all_paths[idx] for idx in selected_indices]
-    
-    start_nodes = np.array([path[0] for path in selected_paths])
-    end_nodes = np.array([path[1] for path in selected_paths])
-   
-    start_coords = all_xy[:, start_nodes, :]
-    end_coords = all_xy[:, end_nodes, :]
-    
-    uncertainty_coordinates = torch.stack([start_coords, end_coords], dim=2)
-
-    distances = torch.norm(uncertainty_coordinates[:, :, 0, :] - uncertainty_coordinates[:, :, 1, :], dim=-1)
-    
-    scale = distances.unsqueeze(-1) / (shape - 1)
-    
-    gamma_samples = torch.zeros((batch_size, selected_paths_count, num_samples), device=all_xy.device)
-    for b in range(batch_size):
-        for p in range(selected_paths_count):
-            gamma_samples[b, p] = torch.tensor(
-                np.random.gamma(
-                    shape=shape,
-                    scale=scale[b, p].item(),
-                    size=num_samples
-                ),
-                device=all_xy.device
-            )
-    
-    gamma_k = gamma(shape)
-    x = gamma_samples
-    theta = scale
-    
-    probabilities = (
-        (x ** (shape - 1)) * torch.exp(-x / theta) /
-        (gamma_k * theta ** shape)
-    )
-    
-    probabilities = probabilities / probabilities.sum(dim=-1, keepdim=True)
-    
-    samples_and_probs = torch.stack([gamma_samples, probabilities], dim=-1)
-    
-    return uncertainty_coordinates, samples_and_probs
